@@ -190,13 +190,15 @@
           </select>
         </div>
 
-        <!-- フィルター（動的） -->
+        <!-- フィルター（動的・データタイプごとに変化） -->
         <div id="api-filter-wrap" class="api-filter-wrap" style="display:none;">
-          <div class="api-filter-label">期間フィルター</div>
+          <div class="api-filter-label">クエリ設定</div>
+          <p id="api-filter-hint" class="api-filter-hint"></p>
           <div id="api-filter-fields"></div>
           <div class="api-field">
             <label for="api-page-size">最大件数 (pageSize)</label>
             <input type="number" id="api-page-size" class="api-input api-input-sm" value="10" min="1" max="10000" />
+            <span id="api-page-size-note" class="api-field-note"></span>
           </div>
         </div>
       </section>
