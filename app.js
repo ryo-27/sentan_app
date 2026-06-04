@@ -562,6 +562,7 @@ apiDatatype.addEventListener('change', () => {
   currentApiItem = API_CATEGORIES[cat].items.find(i => i.id === id) || null;
   if (!currentApiItem) return;
 
+  clearPageToken();
   renderFilterUI(currentApiItem);
   updateEndpoint();
 });
@@ -574,6 +575,7 @@ function getSelectedTimeOption(item) {
 function applyPageSizeLimits(item) {
   const input = document.getElementById('api-page-size');
   const note  = document.getElementById('api-page-size-note');
+  const tokenWrap = document.getElementById('api-page-token-wrap');
   const limits = item.pageSize || { max: 10000, default: 10 };
   input.max = limits.max;
   input.min = 1;
@@ -583,6 +585,7 @@ function applyPageSizeLimits(item) {
   } else {
     note.textContent = '※ 最大 10000';
   }
+  if (tokenWrap) tokenWrap.style.display = item.filter ? 'flex' : 'none';
 }
 
 // ----- フィルターUI 生成（データタイプごとに変化） -----
@@ -671,19 +674,24 @@ function renderFilterUI(item) {
   bindFilterInputListeners();
 }
 
+function onQueryParamsChange() {
+  clearPageToken();
+  if (currentApiItem) updateEndpoint();
+}
+
 function bindFilterInputListeners() {
   document.querySelectorAll('#api-filter-fields input, #api-filter-fields select').forEach(el => {
-    el.removeEventListener('change', updateEndpoint);
-    el.removeEventListener('input', updateEndpoint);
-    el.addEventListener('change', updateEndpoint);
-    el.addEventListener('input', updateEndpoint);
+    el.addEventListener('change', onQueryParamsChange);
+    el.addEventListener('input', onQueryParamsChange);
   });
 }
 
-document.getElementById('api-page-size').addEventListener('change', () => {
+document.getElementById('api-page-size').addEventListener('change', onQueryParamsChange);
+document.getElementById('api-page-size').addEventListener('input', onQueryParamsChange);
+document.getElementById('api-page-token').addEventListener('input', () => {
   if (currentApiItem) updateEndpoint();
 });
-document.getElementById('api-page-size').addEventListener('input', () => {
+document.getElementById('api-page-token').addEventListener('change', () => {
   if (currentApiItem) updateEndpoint();
 });
 
@@ -713,22 +721,44 @@ function buildFilter(item) {
   return `${path} >= "${startLit}" AND ${path} < "${endLit}"`;
 }
 
+function buildApiUrl(item) {
+  const filter   = buildFilter(item);
+  const pageSize = document.getElementById('api-page-size').value;
+  const pageToken = document.getElementById('api-page-token')?.value.trim() || '';
+
+  const url = new URL(BASE_URL + item.path);
+  if (filter) url.searchParams.set('filter', filter);
+  if (item.filter && pageSize) {
+    const max = (item.pageSize && item.pageSize.max) || 10000;
+    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
+  }
+  if (pageToken) url.searchParams.set('pageToken', pageToken);
+  return url;
+}
+
+function clearPageToken() {
+  const input = document.getElementById('api-page-token');
+  if (input) input.value = '';
+  hide(document.getElementById('api-pagination-bar'));
+}
+
+function showNextPageToken(token) {
+  const bar = document.getElementById('api-pagination-bar');
+  const preview = document.getElementById('api-next-page-token-preview');
+  if (!token) {
+    hide(bar);
+    return;
+  }
+  preview.textContent = token;
+  show(bar);
+}
+
 // ----- エンドポイント URL & curl 生成 -----
 function updateEndpoint() {
   if (!currentApiItem) return;
 
   const accessToken = document.getElementById('api-access-token').value.trim();
-  const filter      = buildFilter(currentApiItem);
-  const pageSize    = document.getElementById('api-page-size').value;
-
-  const url = new URL(BASE_URL + currentApiItem.path);
-  if (filter) url.searchParams.set('filter', filter);
-  if (currentApiItem.filter && pageSize) {
-    const max = (currentApiItem.pageSize && currentApiItem.pageSize.max) || 10000;
-    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
-  }
-
-  const fullUrl = url.toString();
+  const fullUrl = buildApiUrl(currentApiItem).toString();
   apiEndpointUrl.textContent = fullUrl;
 
   // curl コマンド
@@ -773,7 +803,7 @@ function copyText(text) {
 }
 
 // ----- API 実行 -----
-document.getElementById('api-execute-btn').addEventListener('click', async () => {
+async function executeApiRequest() {
   if (!currentApiItem) return;
 
   const accessToken = document.getElementById('api-access-token').value.trim();
@@ -782,22 +812,17 @@ document.getElementById('api-execute-btn').addEventListener('click', async () =>
     return;
   }
 
-  const filter   = buildFilter(currentApiItem);
-  const pageSize = document.getElementById('api-page-size').value;
-  const url      = new URL(BASE_URL + currentApiItem.path);
-  if (filter) url.searchParams.set('filter', filter);
-  if (currentApiItem.filter && pageSize) {
-    const max = (currentApiItem.pageSize && currentApiItem.pageSize.max) || 10000;
-    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
-  }
+  const url = buildApiUrl(currentApiItem);
 
   apiResponseSection.style.display = 'block';
   show(apiLoading);
   hide(apiResponseError);
   hide(apiResponseResult);
+  hide(document.getElementById('api-pagination-bar'));
   apiResponseSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const startMs = Date.now();
+  const pageTokenUsed = document.getElementById('api-page-token').value.trim();
 
   try {
     const res = await fetch(url.toString(), {
@@ -820,15 +845,26 @@ document.getElementById('api-execute-btn').addEventListener('click', async () =>
     hide(apiLoading);
 
     const statusClass = res.ok ? 'ok' : 'err';
+    const pageInfo = pageTokenUsed
+      ? '<span class="response-time">pageToken 指定あり</span>'
+      : '<span class="response-time">1ページ目</span>';
     apiResponseMeta.innerHTML = `
       <span class="response-status ${statusClass}">HTTP ${res.status} ${res.statusText}</span>
-      <span class="response-time">${elapsed} ms</span>`;
+      <span class="response-time">${elapsed} ms</span>
+      ${pageInfo}`;
 
     apiResponseBody.textContent = typeof body === 'string'
       ? body
       : JSON.stringify(body, null, 2);
 
     show(apiResponseResult);
+    updateEndpoint();
+
+    if (res.ok && typeof body === 'object' && body && body.nextPageToken) {
+      showNextPageToken(body.nextPageToken);
+    } else {
+      hide(document.getElementById('api-pagination-bar'));
+    }
 
     if (!res.ok) {
       const errMsg = (typeof body === 'object' && body.error)
@@ -843,5 +879,22 @@ document.getElementById('api-execute-btn').addEventListener('click', async () =>
     show(apiResponseResult);
     apiResponseMeta.innerHTML = '<span class="response-status err">ネットワークエラー</span>';
     apiResponseBody.textContent = '';
+    hide(document.getElementById('api-pagination-bar'));
   }
+}
+
+document.getElementById('api-execute-btn').addEventListener('click', executeApiRequest);
+
+document.getElementById('api-fetch-next-btn').addEventListener('click', () => {
+  const preview = document.getElementById('api-next-page-token-preview');
+  const token = preview.textContent.trim();
+  if (!token) return;
+  document.getElementById('api-page-token').value = token;
+  updateEndpoint();
+  executeApiRequest();
+});
+
+document.getElementById('api-clear-page-token-btn').addEventListener('click', () => {
+  clearPageToken();
+  if (currentApiItem) updateEndpoint();
 });
