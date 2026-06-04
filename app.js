@@ -306,108 +306,195 @@ document.querySelectorAll('.copy-token-btn').forEach(btn => {
 
 const BASE_URL = 'https://health.googleapis.com';
 
-// ----- データタイプ定義 -----
-// filterType:
-//   none     → パラメータなし (user系エンドポイント)
-//   interval → interval.civil_start_time (steps, floors, distance, etc.)
-//   sample   → sample_time.civil_time (heart-rate, weight, etc.)
-//   daily    → .date (daily-* 系) ※フィルター名は snake_case (例: daily_heart_rate_variability)
-//   session  → interval.civil_start_time (exercise, nutrition-log, etc.)
-//   sleep    → interval.civil_end_time
-//   ecg      → interval.start_time (UTC ISO8601)
-//
-// フィルター式のデータタイプ名 (公式 Endpoints):
-//   URL パス → kebab-case (例: heart-rate-variability)
-//   filter  → 複数語は snake_case (例: heart_rate_variability)、単語はそのまま (例: steps)
-//   https://developers.google.com/health/endpoints
+// ----- フィルター時刻オプション (list API / Endpoints 準拠) -----
+// https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/list
+// https://developers.google.com/health/endpoints
+const TIME_FILTER_OPTIONS = {
+  interval_civil_start: {
+    label: '区間開始（現地日時）',
+    path: 'interval.civil_start_time',
+    inputType: 'civil',
+    inputWidget: 'datetime-local',
+    hint: 'ISO 8601 日付または日時（例: 2026-03-04 / 2026-03-04T12:00:00）',
+    rangeEnd: true,
+  },
+  interval_start: {
+    label: '区間開始（UTC・物理時刻）',
+    path: 'interval.start_time',
+    inputType: 'utc',
+    inputWidget: 'datetime-local',
+    hint: 'RFC 3339 UTC（例: 2026-03-04T00:00:00Z）',
+    rangeEnd: true,
+  },
+  sample_civil: {
+    label: 'サンプル時刻（現地日時）',
+    path: 'sample_time.civil_time',
+    inputType: 'civil',
+    inputWidget: 'date',
+    hint: '体重・心拍などのサンプル観測（現地日時・日付）',
+    rangeEnd: true,
+  },
+  sample_physical: {
+    label: 'サンプル時刻（UTC・物理時刻）',
+    path: 'sample_time.physical_time',
+    inputType: 'utc',
+    inputWidget: 'datetime-local',
+    hint: '公式推奨の physical_time（例: body_fat）',
+    rangeEnd: true,
+  },
+  daily_date: {
+    label: '日次サマリー日付',
+    path: 'date',
+    inputType: 'date',
+    inputWidget: 'date',
+    hint: 'YYYY-MM-DD のみ',
+    rangeEnd: true,
+  },
+  session_civil_start: {
+    label: 'セッション開始（現地日時）',
+    path: 'interval.civil_start_time',
+    inputType: 'civil',
+    inputWidget: 'datetime-local',
+    hint: 'exercise / nutrition-log など',
+    rangeEnd: true,
+  },
+  sleep_civil_end: {
+    label: '睡眠終了（現地日時）',
+    path: 'interval.civil_end_time',
+    inputType: 'civil',
+    inputWidget: 'date',
+    field: 'sleep',
+    hint: 'sleep 専用・civil_end_time',
+    rangeEnd: true,
+  },
+  sleep_end: {
+    label: '睡眠終了（UTC・物理時刻）',
+    path: 'interval.end_time',
+    inputType: 'utc',
+    inputWidget: 'datetime-local',
+    field: 'sleep',
+    hint: 'sleep 専用・end_time（RFC 3339）',
+    rangeEnd: true,
+  },
+  ecg_start: {
+    label: 'ECG 開始（UTC）',
+    path: 'interval.start_time',
+    inputType: 'utc',
+    inputWidget: 'datetime-local',
+    field: 'electrocardiogram',
+    hint: '開始時刻のみ（>=）。終了日フィルターは非対応',
+    rangeEnd: false,
+  },
+};
 
 function kebabToSnake(str) {
   return str.replace(/-/g, '_');
 }
 
-/** @returns {string} filter 式の先頭セグメント（data type 識別子） */
+/** filter 式の data type 識別子（URL=kebab / filter=snake） */
 function getFilterField(item) {
   return item.id.includes('-') ? kebabToSnake(item.id) : item.id;
+}
+
+function getFilterFieldForOption(item, option) {
+  if (option.field) return option.field;
+  return getFilterField(item);
+}
+
+/** @param {'civil'|'utc'|'date'} inputType */
+function formatFilterLiteral(value, inputType, isEnd) {
+  if (!value) return '';
+  if (inputType === 'date') return value.slice(0, 10);
+  if (inputType === 'civil') {
+    if (value.length === 10) return value;
+    return value.length === 16 ? value + ':00' : value;
+  }
+  // utc
+  if (value.length === 10) {
+    return isEnd ? `${value}T23:59:59Z` : `${value}T00:00:00Z`;
+  }
+  if (value.length === 16) return value + ':00Z';
+  return value.endsWith('Z') ? value : value + 'Z';
 }
 
 const API_CATEGORIES = {
   user: {
     label: 'ユーザー情報',
     items: [
-      { id: 'identity',     label: 'getIdentity (ユーザーID)', method: 'GET', path: '/v4/users/me/identity',     filterType: 'none' },
-      { id: 'profile',      label: 'getProfile (プロフィール)',  method: 'GET', path: '/v4/users/me/profile',      filterType: 'none' },
-      { id: 'settings',     label: 'getSettings (設定)',         method: 'GET', path: '/v4/users/me/settings',     filterType: 'none' },
-      { id: 'pairedDevices',label: 'listPairedDevices (デバイス一覧)', method: 'GET', path: '/v4/users/me/pairedDevices', filterType: 'none' },
+      { id: 'identity',     label: 'getIdentity (ユーザーID)', method: 'GET', path: '/v4/users/me/identity',     filter: null },
+      { id: 'profile',      label: 'getProfile (プロフィール)',  method: 'GET', path: '/v4/users/me/profile',      filter: null },
+      { id: 'settings',     label: 'getSettings (設定)',         method: 'GET', path: '/v4/users/me/settings',     filter: null },
+      { id: 'pairedDevices',label: 'listPairedDevices (デバイス一覧)', method: 'GET', path: '/v4/users/me/pairedDevices', filter: null },
     ],
   },
   activity: {
     label: 'アクティビティ & フィットネス',
     items: [
-      { id: 'steps',               label: '歩数 (steps)',                       method: 'GET', path: '/v4/users/me/dataTypes/steps/dataPoints',                filterType: 'interval' },
-      { id: 'floors',              label: '階数 (floors)',                      method: 'GET', path: '/v4/users/me/dataTypes/floors/dataPoints',               filterType: 'interval' },
-      { id: 'distance',            label: '距離 (distance)',                    method: 'GET', path: '/v4/users/me/dataTypes/distance/dataPoints',             filterType: 'interval' },
-      { id: 'altitude',            label: '高度 (altitude)',                    method: 'GET', path: '/v4/users/me/dataTypes/altitude/dataPoints',             filterType: 'interval' },
-      { id: 'active-zone-minutes', label: 'アクティブゾーン分 (active-zone-minutes)', method: 'GET', path: '/v4/users/me/dataTypes/active-zone-minutes/dataPoints', filterType: 'interval' },
-      { id: 'active-minutes',      label: 'アクティブ分 (active-minutes)',      method: 'GET', path: '/v4/users/me/dataTypes/active-minutes/dataPoints',      filterType: 'interval' },
-      { id: 'active-energy-burned',label: '消費カロリー (active-energy-burned)', method: 'GET', path: '/v4/users/me/dataTypes/active-energy-burned/dataPoints', filterType: 'interval' },
-      { id: 'sedentary-period',    label: '座位時間 (sedentary-period)',        method: 'GET', path: '/v4/users/me/dataTypes/sedentary-period/dataPoints',    filterType: 'interval' },
-      { id: 'swim-lengths-data',   label: '水泳ラップ (swim-lengths-data)',      method: 'GET', path: '/v4/users/me/dataTypes/swim-lengths-data/dataPoints',   filterType: 'interval' },
-      { id: 'time-in-heart-rate-zone', label: '心拍ゾーン時間 (time-in-heart-rate-zone)', method: 'GET', path: '/v4/users/me/dataTypes/time-in-heart-rate-zone/dataPoints', filterType: 'interval' },
-      { id: 'activity-level',      label: '活動レベル (activity-level)',        method: 'GET', path: '/v4/users/me/dataTypes/activity-level/dataPoints',      filterType: 'daily' },
+      { id: 'steps',               label: '歩数 (steps)',                       method: 'GET', path: '/v4/users/me/dataTypes/steps/dataPoints',                filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'floors',              label: '階数 (floors)',                      method: 'GET', path: '/v4/users/me/dataTypes/floors/dataPoints',               filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'distance',            label: '距離 (distance)',                    method: 'GET', path: '/v4/users/me/dataTypes/distance/dataPoints',             filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'altitude',            label: '高度 (altitude)',                    method: 'GET', path: '/v4/users/me/dataTypes/altitude/dataPoints',             filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'active-zone-minutes', label: 'アクティブゾーン分 (active-zone-minutes)', method: 'GET', path: '/v4/users/me/dataTypes/active-zone-minutes/dataPoints', filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'active-minutes',      label: 'アクティブ分 (active-minutes)',      method: 'GET', path: '/v4/users/me/dataTypes/active-minutes/dataPoints',      filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'active-energy-burned',label: '消費カロリー (active-energy-burned)', method: 'GET', path: '/v4/users/me/dataTypes/active-energy-burned/dataPoints', filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'sedentary-period',    label: '座位時間 (sedentary-period)',        method: 'GET', path: '/v4/users/me/dataTypes/sedentary-period/dataPoints',    filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'swim-lengths-data',   label: '水泳ラップ (swim-lengths-data)',      method: 'GET', path: '/v4/users/me/dataTypes/swim-lengths-data/dataPoints',   filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'time-in-heart-rate-zone', label: '心拍ゾーン時間 (time-in-heart-rate-zone)', method: 'GET', path: '/v4/users/me/dataTypes/time-in-heart-rate-zone/dataPoints', filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
+      { id: 'activity-level',      label: '活動レベル (activity-level)',        method: 'GET', path: '/v4/users/me/dataTypes/activity-level/dataPoints',      filter: { options: ['daily_date'], default: 'daily_date' } },
     ],
   },
   heart: {
     label: '心拍',
     items: [
-      { id: 'heart-rate',                 label: '心拍数 (heart-rate)',                          method: 'GET', path: '/v4/users/me/dataTypes/heart-rate/dataPoints',                  filterType: 'sample' },
-      { id: 'heart-rate-variability',     label: '心拍変動 (heart-rate-variability)',             method: 'GET', path: '/v4/users/me/dataTypes/heart-rate-variability/dataPoints',      filterType: 'sample' },
-      { id: 'daily-resting-heart-rate',   label: '安静時心拍数 (daily-resting-heart-rate)',       method: 'GET', path: '/v4/users/me/dataTypes/daily-resting-heart-rate/dataPoints',   filterType: 'daily' },
-      { id: 'daily-heart-rate-variability',label: '日次心拍変動 (daily-heart-rate-variability)', method: 'GET', path: '/v4/users/me/dataTypes/daily-heart-rate-variability/dataPoints', filterType: 'daily' },
-      { id: 'daily-heart-rate-zones',     label: '日次心拍ゾーン (daily-heart-rate-zones)',       method: 'GET', path: '/v4/users/me/dataTypes/daily-heart-rate-zones/dataPoints',     filterType: 'daily' },
-      { id: 'irregular-rhythm-notification', label: '不整脈通知 (irregular-rhythm-notification)', method: 'GET', path: '/v4/users/me/dataTypes/irregular-rhythm-notification/dataPoints', filterType: 'session' },
-      { id: 'electrocardiogram',          label: '心電図 (electrocardiogram)',                    method: 'GET', path: '/v4/users/me/dataTypes/electrocardiogram/dataPoints',           filterType: 'ecg' },
+      { id: 'heart-rate',                 label: '心拍数 (heart-rate)',                          method: 'GET', path: '/v4/users/me/dataTypes/heart-rate/dataPoints',                  filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'heart-rate-variability',     label: '心拍変動 (heart-rate-variability)',             method: 'GET', path: '/v4/users/me/dataTypes/heart-rate-variability/dataPoints',      filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'daily-resting-heart-rate',   label: '安静時心拍数 (daily-resting-heart-rate)',       method: 'GET', path: '/v4/users/me/dataTypes/daily-resting-heart-rate/dataPoints',   filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'daily-heart-rate-variability',label: '日次心拍変動 (daily-heart-rate-variability)', method: 'GET', path: '/v4/users/me/dataTypes/daily-heart-rate-variability/dataPoints', filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'daily-heart-rate-zones',     label: '日次心拍ゾーン (daily-heart-rate-zones)',       method: 'GET', path: '/v4/users/me/dataTypes/daily-heart-rate-zones/dataPoints',     filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'irregular-rhythm-notification', label: '不整脈通知 (irregular-rhythm-notification)', method: 'GET', path: '/v4/users/me/dataTypes/irregular-rhythm-notification/dataPoints', filter: { options: ['session_civil_start'], default: 'session_civil_start' } },
+      { id: 'electrocardiogram',          label: '心電図 (electrocardiogram)',                    method: 'GET', path: '/v4/users/me/dataTypes/electrocardiogram/dataPoints',           filter: { options: ['ecg_start'], default: 'ecg_start' }, pageSize: { max: 25, default: 25 } },
     ],
   },
   sleep: {
     label: '睡眠',
     items: [
-      { id: 'sleep',                            label: '睡眠セッション (sleep)',                           method: 'GET', path: '/v4/users/me/dataTypes/sleep/dataPoints',                          filterType: 'sleep' },
-      { id: 'daily-sleep-temperature-derivations', label: '睡眠体温変化 (daily-sleep-temperature-derivations)', method: 'GET', path: '/v4/users/me/dataTypes/daily-sleep-temperature-derivations/dataPoints', filterType: 'daily' },
-      { id: 'respiratory-rate-sleep-summary',   label: '睡眠呼吸数 (respiratory-rate-sleep-summary)',    method: 'GET', path: '/v4/users/me/dataTypes/respiratory-rate-sleep-summary/dataPoints', filterType: 'sample' },
-      { id: 'daily-respiratory-rate',           label: '日次呼吸数 (daily-respiratory-rate)',            method: 'GET', path: '/v4/users/me/dataTypes/daily-respiratory-rate/dataPoints',       filterType: 'daily' },
+      { id: 'sleep',                            label: '睡眠セッション (sleep)',                           method: 'GET', path: '/v4/users/me/dataTypes/sleep/dataPoints',                          filter: { options: ['sleep_civil_end', 'sleep_end'], default: 'sleep_civil_end' }, pageSize: { max: 25, default: 25 } },
+      { id: 'daily-sleep-temperature-derivations', label: '睡眠体温変化 (daily-sleep-temperature-derivations)', method: 'GET', path: '/v4/users/me/dataTypes/daily-sleep-temperature-derivations/dataPoints', filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'respiratory-rate-sleep-summary',   label: '睡眠呼吸数 (respiratory-rate-sleep-summary)',    method: 'GET', path: '/v4/users/me/dataTypes/respiratory-rate-sleep-summary/dataPoints', filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'daily-respiratory-rate',           label: '日次呼吸数 (daily-respiratory-rate)',            method: 'GET', path: '/v4/users/me/dataTypes/daily-respiratory-rate/dataPoints',       filter: { options: ['daily_date'], default: 'daily_date' } },
     ],
   },
   body: {
     label: '体組成',
     items: [
-      { id: 'weight',    label: '体重 (weight)',       method: 'GET', path: '/v4/users/me/dataTypes/weight/dataPoints',     filterType: 'sample' },
-      { id: 'body-fat',  label: '体脂肪率 (body-fat)', method: 'GET', path: '/v4/users/me/dataTypes/body-fat/dataPoints',   filterType: 'sample' },
-      { id: 'height',    label: '身長 (height)',       method: 'GET', path: '/v4/users/me/dataTypes/height/dataPoints',     filterType: 'sample' },
+      { id: 'weight',    label: '体重 (weight)',       method: 'GET', path: '/v4/users/me/dataTypes/weight/dataPoints',     filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'body-fat',  label: '体脂肪率 (body-fat)', method: 'GET', path: '/v4/users/me/dataTypes/body-fat/dataPoints',   filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_physical' } },
+      { id: 'height',    label: '身長 (height)',       method: 'GET', path: '/v4/users/me/dataTypes/height/dataPoints',     filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
     ],
   },
   health: {
     label: '健康指標',
     items: [
-      { id: 'oxygen-saturation',       label: '血中酸素濃度 (oxygen-saturation)',         method: 'GET', path: '/v4/users/me/dataTypes/oxygen-saturation/dataPoints',       filterType: 'sample' },
-      { id: 'daily-oxygen-saturation', label: '日次血中酸素 (daily-oxygen-saturation)',   method: 'GET', path: '/v4/users/me/dataTypes/daily-oxygen-saturation/dataPoints', filterType: 'daily' },
-      { id: 'vo2-max',                 label: 'VO2Max (vo2-max)',                         method: 'GET', path: '/v4/users/me/dataTypes/vo2-max/dataPoints',                 filterType: 'sample' },
-      { id: 'run-vo2-max',             label: 'ランニングVO2Max (run-vo2-max)',            method: 'GET', path: '/v4/users/me/dataTypes/run-vo2-max/dataPoints',             filterType: 'sample' },
-      { id: 'daily-vo2-max',           label: '日次VO2Max (daily-vo2-max)',               method: 'GET', path: '/v4/users/me/dataTypes/daily-vo2-max/dataPoints',           filterType: 'daily' },
-      { id: 'core-body-temperature',   label: '体温 (core-body-temperature)',             method: 'GET', path: '/v4/users/me/dataTypes/core-body-temperature/dataPoints',   filterType: 'sample' },
-      { id: 'blood-glucose',           label: '血糖値 (blood-glucose)',                   method: 'GET', path: '/v4/users/me/dataTypes/blood-glucose/dataPoints',           filterType: 'sample' },
+      { id: 'oxygen-saturation',       label: '血中酸素濃度 (oxygen-saturation)',         method: 'GET', path: '/v4/users/me/dataTypes/oxygen-saturation/dataPoints',       filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'daily-oxygen-saturation', label: '日次血中酸素 (daily-oxygen-saturation)',   method: 'GET', path: '/v4/users/me/dataTypes/daily-oxygen-saturation/dataPoints', filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'vo2-max',                 label: 'VO2Max (vo2-max)',                         method: 'GET', path: '/v4/users/me/dataTypes/vo2-max/dataPoints',                 filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'run-vo2-max',             label: 'ランニングVO2Max (run-vo2-max)',            method: 'GET', path: '/v4/users/me/dataTypes/run-vo2-max/dataPoints',             filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'daily-vo2-max',           label: '日次VO2Max (daily-vo2-max)',               method: 'GET', path: '/v4/users/me/dataTypes/daily-vo2-max/dataPoints',           filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'core-body-temperature',   label: '体温 (core-body-temperature)',             method: 'GET', path: '/v4/users/me/dataTypes/core-body-temperature/dataPoints',   filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
+      { id: 'blood-glucose',           label: '血糖値 (blood-glucose)',                   method: 'GET', path: '/v4/users/me/dataTypes/blood-glucose/dataPoints',           filter: { options: ['sample_civil', 'sample_physical'], default: 'sample_civil' } },
     ],
   },
   exercise: {
     label: 'エクササイズ',
     items: [
-      { id: 'exercise', label: 'エクササイズセッション (exercise)', method: 'GET', path: '/v4/users/me/dataTypes/exercise/dataPoints', filterType: 'session' },
+      { id: 'exercise', label: 'エクササイズセッション (exercise)', method: 'GET', path: '/v4/users/me/dataTypes/exercise/dataPoints', filter: { options: ['session_civil_start'], default: 'session_civil_start' }, pageSize: { max: 25, default: 25 } },
     ],
   },
   nutrition: {
     label: '栄養 & 水分',
     items: [
-      { id: 'nutrition-log',  label: '栄養ログ (nutrition-log)',  method: 'GET', path: '/v4/users/me/dataTypes/nutrition-log/dataPoints',  filterType: 'session' },
-      { id: 'hydration-log',  label: '水分ログ (hydration-log)',  method: 'GET', path: '/v4/users/me/dataTypes/hydration-log/dataPoints',  filterType: 'session' },
+      { id: 'nutrition-log',  label: '栄養ログ (nutrition-log)',  method: 'GET', path: '/v4/users/me/dataTypes/nutrition-log/dataPoints',  filter: { options: ['session_civil_start'], default: 'session_civil_start' } },
+      { id: 'hydration-log',  label: '水分ログ (hydration-log)',  method: 'GET', path: '/v4/users/me/dataTypes/hydration-log/dataPoints',  filter: { options: ['session_civil_start'], default: 'session_civil_start' } },
     ],
   },
 };
@@ -479,92 +566,151 @@ apiDatatype.addEventListener('change', () => {
   updateEndpoint();
 });
 
-// ----- フィルターUI 生成 -----
+function getSelectedTimeOption(item) {
+  const key = document.getElementById('filter-time-key')?.value || item.filter.default;
+  return TIME_FILTER_OPTIONS[key];
+}
+
+function applyPageSizeLimits(item) {
+  const input = document.getElementById('api-page-size');
+  const note  = document.getElementById('api-page-size-note');
+  const limits = item.pageSize || { max: 10000, default: 10 };
+  input.max = limits.max;
+  input.min = 1;
+  input.value = Math.min(Number(input.value) || limits.default, limits.max);
+  if (limits.max <= 25) {
+    note.textContent = `※ ${item.id} は pageSize 最大 ${limits.max}（公式デフォルト ${limits.default}）`;
+  } else {
+    note.textContent = '※ 最大 10000';
+  }
+}
+
+// ----- フィルターUI 生成（データタイプごとに変化） -----
 function renderFilterUI(item) {
   apiFilterFields.innerHTML = '';
-  const { filterType } = item;
+  const hintEl = document.getElementById('api-filter-hint');
 
-  if (filterType === 'none') {
+  if (!item.filter) {
     apiFilterWrap.style.display = 'none';
+    hintEl.textContent = '';
     return;
   }
 
   apiFilterWrap.style.display = 'flex';
-  const { start, end } = defaultDates();
+  applyPageSizeLimits(item);
 
-  if (filterType === 'daily') {
-    apiFilterFields.innerHTML = `
-      <div class="filter-date-row">
-        <div class="api-field">
-          <label>開始日 (以上)</label>
-          <input type="date" id="filter-start" class="api-input" value="${start}" />
-        </div>
-        <div class="api-field">
-          <label>終了日 (未満)</label>
-          <input type="date" id="filter-end" class="api-input" value="${end}" />
-        </div>
-      </div>`;
-  } else if (filterType === 'ecg') {
-    apiFilterFields.innerHTML = `
+  const { start, end } = defaultDates();
+  const defaultKey = item.filter.default;
+  const defaultOpt = TIME_FILTER_OPTIONS[defaultKey];
+
+  let timeKeySelectHtml = '';
+  if (item.filter.options.length > 1) {
+    const opts = item.filter.options.map(key => {
+      const o = TIME_FILTER_OPTIONS[key];
+      const sel = key === defaultKey ? ' selected' : '';
+      return `<option value="${key}"${sel}>${o.label}</option>`;
+    }).join('');
+    timeKeySelectHtml = `
       <div class="api-field">
-        <label>開始日 (以上・UTC) ※ECGは終了日フィルター非対応</label>
-        <input type="date" id="filter-start" class="api-input" value="${start}" />
-        <input type="hidden" id="filter-end" value="${end}" />
+        <label for="filter-time-key">時刻の種類</label>
+        <select id="filter-time-key" class="api-select">${opts}</select>
       </div>`;
   } else {
-    // interval / sample / session / sleep
-    apiFilterFields.innerHTML = `
+    timeKeySelectHtml = `<input type="hidden" id="filter-time-key" value="${defaultKey}" />`;
+  }
+
+  hintEl.textContent = defaultOpt.hint;
+
+  function buildTimeInputsHtml(opt) {
+    const isUtc = opt.inputType === 'utc';
+    const inputType = opt.inputWidget || (opt.inputType === 'date' ? 'date' : 'datetime-local');
+    const startVal = isUtc ? `${start}T00:00` : start;
+    const endVal = isUtc ? `${end}T00:00` : end;
+    const startLabel = opt.rangeEnd
+      ? (isUtc ? '開始 (以上・UTC)' : '開始 (以上)')
+      : (isUtc ? '開始 (以上・UTC) のみ' : '開始 (以上) のみ');
+
+    if (!opt.rangeEnd) {
+      return `
+        <div class="api-field">
+          <label for="filter-start">${startLabel}</label>
+          <input type="${inputType}" id="filter-start" class="api-input" value="${startVal}" />
+          <input type="hidden" id="filter-end" value="${end}" />
+        </div>`;
+    }
+    return `
       <div class="filter-date-row">
         <div class="api-field">
-          <label>開始日 (以上)</label>
-          <input type="date" id="filter-start" class="api-input" value="${start}" />
+          <label for="filter-start">${startLabel}</label>
+          <input type="${inputType}" id="filter-start" class="api-input" value="${startVal}" />
         </div>
         <div class="api-field">
-          <label>終了日 (未満)</label>
-          <input type="date" id="filter-end" class="api-input" value="${end}" />
+          <label for="filter-end">${isUtc ? '終了 (未満・UTC)' : '終了 (未満)'}</label>
+          <input type="${inputType}" id="filter-end" class="api-input" value="${endVal}" />
         </div>
       </div>`;
   }
 
-  // 入力変更時にエンドポイント再生成
-  apiFilterFields.querySelectorAll('input').forEach(inp => {
-    inp.addEventListener('change', updateEndpoint);
-    inp.addEventListener('input', updateEndpoint);
-  });
-  document.getElementById('api-page-size').addEventListener('change', updateEndpoint);
+  apiFilterFields.innerHTML = timeKeySelectHtml + `<div id="filter-time-inputs">${buildTimeInputsHtml(defaultOpt)}</div>`;
+
+  const timeKeyEl = document.getElementById('filter-time-key');
+  const inputsWrap = document.getElementById('filter-time-inputs');
+
+  function onTimeKeyChange() {
+    const opt = getSelectedTimeOption(item);
+    hintEl.textContent = opt.hint;
+    inputsWrap.innerHTML = buildTimeInputsHtml(opt);
+    bindFilterInputListeners();
+    updateEndpoint();
+  }
+
+  if (timeKeyEl.tagName === 'SELECT') {
+    timeKeyEl.addEventListener('change', onTimeKeyChange);
+  }
+
+  bindFilterInputListeners();
 }
+
+function bindFilterInputListeners() {
+  document.querySelectorAll('#api-filter-fields input, #api-filter-fields select').forEach(el => {
+    el.removeEventListener('change', updateEndpoint);
+    el.removeEventListener('input', updateEndpoint);
+    el.addEventListener('change', updateEndpoint);
+    el.addEventListener('input', updateEndpoint);
+  });
+}
+
+document.getElementById('api-page-size').addEventListener('change', () => {
+  if (currentApiItem) updateEndpoint();
+});
+document.getElementById('api-page-size').addEventListener('input', () => {
+  if (currentApiItem) updateEndpoint();
+});
 
 // ----- フィルター式 生成 -----
 function buildFilter(item) {
-  const { filterType } = item;
-  if (filterType === 'none') return null;
+  if (!item.filter) return null;
 
+  const opt = getSelectedTimeOption(item);
   const startEl = document.getElementById('filter-start');
   const endEl   = document.getElementById('filter-end');
   if (!startEl || !endEl) return null;
 
-  const startVal = startEl.value;
-  const endVal   = endEl.value;
-  if (!startVal || !endVal) return null;
+  const startRaw = startEl.value;
+  if (!startRaw) return null;
 
-  const field = getFilterField(item);
+  const field = getFilterFieldForOption(item, opt);
+  const path = `${field}.${opt.path}`;
+  const startLit = formatFilterLiteral(startRaw, opt.inputType, false);
 
-  switch (filterType) {
-    case 'interval':
-    case 'session':
-      return `${field}.interval.civil_start_time >= "${startVal}" AND ${field}.interval.civil_start_time < "${endVal}"`;
-    case 'sample':
-      return `${field}.sample_time.civil_time >= "${startVal}" AND ${field}.sample_time.civil_time < "${endVal}"`;
-    case 'daily':
-      return `${field}.date >= "${startVal}" AND ${field}.date < "${endVal}"`;
-    case 'sleep':
-      return `sleep.interval.civil_end_time >= "${startVal}" AND sleep.interval.civil_end_time < "${endVal}"`;
-    case 'ecg':
-      // ECG は start_time の >= のみサポート（公式: end_time フィルター非対応）
-      return `electrocardiogram.interval.start_time >= "${startVal}T00:00:00Z"`;
-    default:
-      return null;
+  if (!opt.rangeEnd) {
+    return `${path} >= "${startLit}"`;
   }
+
+  const endRaw = endEl.value;
+  if (!endRaw) return null;
+  const endLit = formatFilterLiteral(endRaw, opt.inputType, true);
+  return `${path} >= "${startLit}" AND ${path} < "${endLit}"`;
 }
 
 // ----- エンドポイント URL & curl 生成 -----
@@ -577,8 +723,9 @@ function updateEndpoint() {
 
   const url = new URL(BASE_URL + currentApiItem.path);
   if (filter) url.searchParams.set('filter', filter);
-  if (currentApiItem.filterType !== 'none' && pageSize) {
-    url.searchParams.set('pageSize', pageSize);
+  if (currentApiItem.filter && pageSize) {
+    const max = (currentApiItem.pageSize && currentApiItem.pageSize.max) || 10000;
+    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
   }
 
   const fullUrl = url.toString();
@@ -639,8 +786,9 @@ document.getElementById('api-execute-btn').addEventListener('click', async () =>
   const pageSize = document.getElementById('api-page-size').value;
   const url      = new URL(BASE_URL + currentApiItem.path);
   if (filter) url.searchParams.set('filter', filter);
-  if (currentApiItem.filterType !== 'none' && pageSize) {
-    url.searchParams.set('pageSize', pageSize);
+  if (currentApiItem.filter && pageSize) {
+    const max = (currentApiItem.pageSize && currentApiItem.pageSize.max) || 10000;
+    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
   }
 
   apiResponseSection.style.display = 'block';
