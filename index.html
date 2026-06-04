@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OAuth 管理ツール</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>OAuth 管理ツール</h1>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="fitbit">fitbit登録</button>
+      <button class="tab-btn" data-tab="api">API実行</button>
+    </nav>
+
+    <!-- fitbit登録タブ -->
+    <div id="tab-fitbit" class="tab-content active">
+
+      <!-- Step 1: credentials.json 入力 -->
+      <section class="step-card">
+        <div class="step-header">
+          <span class="step-badge">Step 1</span>
+          <h2>credentials.json を貼り付ける</h2>
+        </div>
+        <p class="step-desc">Google Cloud Console からダウンロードした <code>credentials.json</code> の内容を貼り付けてください。</p>
+        <textarea
+          id="credentials-input"
+          class="code-textarea"
+          placeholder='{"web":{"client_id":"...","client_secret":"...","redirect_uris":["..."],...}}'
+          rows="8"
+        ></textarea>
+        <div class="btn-row">
+          <button id="parse-credentials-btn" class="btn btn-primary">認可URLを生成</button>
+          <button id="clear-credentials-btn" class="btn btn-ghost">クリア</button>
+        </div>
+        <div id="credentials-error" class="error-box hidden"></div>
+      </section>
+
+      <!-- Step 2: 認可URL表示 -->
+      <section id="step2-section" class="step-card hidden">
+        <div class="step-header">
+          <span class="step-badge">Step 2</span>
+          <h2>Google 認可ページを開く</h2>
+        </div>
+        <p class="step-desc">以下のURLをクリックして Google アカウントで承認してください。承認後にリダイレクトされたURLをそのままコピーしてください。</p>
+        <div class="url-display-wrap">
+          <a id="auth-url-link" href="#" target="_blank" class="auth-url-link" rel="noopener noreferrer"></a>
+          <button id="copy-url-btn" class="btn btn-icon" title="URLをコピー">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+        <div id="copy-toast" class="toast hidden">コピーしました！</div>
+      </section>
+
+      <!-- Step 3: リダイレクトURL / code 入力 -->
+      <section id="step3-section" class="step-card hidden">
+        <div class="step-header">
+          <span class="step-badge">Step 3</span>
+          <h2>リダイレクト先URLを貼り付ける</h2>
+        </div>
+        <p class="step-desc">承認後にリダイレクトされたURL（<code>code=...</code> が含まれるもの）をそのまま貼り付けてください。</p>
+        <textarea
+          id="redirect-url-input"
+          class="code-textarea"
+          placeholder="https://www.google.com/?code=4%2F0ATX87lN...&scope=..."
+          rows="4"
+        ></textarea>
+        <div class="btn-row">
+          <button id="exchange-code-btn" class="btn btn-primary">トークンを取得</button>
+          <button id="clear-redirect-btn" class="btn btn-ghost">クリア</button>
+        </div>
+        <div id="redirect-error" class="error-box hidden"></div>
+      </section>
+
+      <!-- Step 4: トークン表示 -->
+      <section id="step4-section" class="step-card hidden">
+        <div class="step-header">
+          <span class="step-badge">Step 4</span>
+          <h2>取得したトークン</h2>
+        </div>
+        <div id="token-loading" class="loading hidden">
+          <span class="spinner"></span> トークンを取得中...
+        </div>
+        <div id="token-error" class="error-box hidden"></div>
+        <div id="token-result" class="hidden">
+          <div class="token-grid">
+            <div class="token-item">
+              <label>access_token</label>
+              <div class="token-value-wrap">
+                <code id="val-access-token" class="token-value"></code>
+                <button class="btn btn-icon copy-token-btn" data-target="val-access-token" title="コピー">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="token-item">
+              <label>refresh_token</label>
+              <div class="token-value-wrap">
+                <code id="val-refresh-token" class="token-value"></code>
+                <button class="btn btn-icon copy-token-btn" data-target="val-refresh-token" title="コピー">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="token-item">
+              <label>scope</label>
+              <code id="val-scope" class="token-value"></code>
+            </div>
+            <div class="token-item">
+              <label>expires_in</label>
+              <code id="val-expires-in" class="token-value"></code>
+            </div>
+            <div class="token-item">
+              <label>token_type</label>
+              <code id="val-token-type" class="token-value"></code>
+            </div>
+          </div>
+          <div class="raw-json-wrap">
+            <details>
+              <summary>レスポンス全体 (JSON)</summary>
+              <pre id="raw-json-output" class="raw-json"></pre>
+            </details>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /tab-fitbit -->
+
+    <!-- API実行タブ -->
+    <div id="tab-api" class="tab-content">
+
+      <!-- 認証情報 -->
+      <section class="step-card">
+        <div class="step-header">
+          <span class="step-badge api-badge">認証</span>
+          <h2>認証情報</h2>
+        </div>
+        <div class="api-auth-grid">
+          <div class="api-field">
+            <label for="api-access-token">Access Token</label>
+            <input type="password" id="api-access-token" class="api-input"
+              placeholder="Access Token を入力"
+              autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="api-field-row">
+            <div class="api-field">
+              <label for="api-client-id">Client ID</label>
+              <input type="password" id="api-client-id" class="api-input"
+                placeholder="Client ID を入力"
+                autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="api-field">
+              <label for="api-client-secret">Client Secret</label>
+              <input type="password" id="api-client-secret" class="api-input"
+                placeholder="Client Secret を入力"
+                autocomplete="off" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- エンドポイント選択 -->
+      <section class="step-card">
+        <div class="step-header">
+          <span class="step-badge api-badge">選択</span>
+          <h2>取得するデータ</h2>
+        </div>
+        <div class="api-field">
+          <label for="api-category">カテゴリ</label>
+          <select id="api-category" class="api-select">
+            <option value="">-- カテゴリを選択 --</option>
+            <option value="user">ユーザー情報</option>
+            <option value="activity">アクティビティ &amp; フィットネス</option>
+            <option value="heart">心拍</option>
+            <option value="sleep">睡眠</option>
+            <option value="body">体組成</option>
+            <option value="health">健康指標</option>
+            <option value="exercise">エクササイズ</option>
+            <option value="nutrition">栄養 &amp; 水分</option>
+          </select>
+        </div>
+        <div class="api-field" id="api-datatype-wrap" style="display:none;">
+          <label for="api-datatype">データタイプ</label>
+          <select id="api-datatype" class="api-select">
+            <option value="">-- データタイプを選択 --</option>
+          </select>
+        </div>
+
+        <!-- フィルター（動的） -->
+        <div id="api-filter-wrap" class="api-filter-wrap" style="display:none;">
+          <div class="api-filter-label">期間フィルター</div>
+          <div id="api-filter-fields"></div>
+          <div class="api-field">
+            <label for="api-page-size">最大件数 (pageSize)</label>
+            <input type="number" id="api-page-size" class="api-input api-input-sm" value="10" min="1" max="10000" />
+          </div>
+        </div>
+      </section>
+
+      <!-- 生成されたエンドポイント -->
+      <section class="step-card" id="api-endpoint-section" style="display:none;">
+        <div class="step-header">
+          <span class="step-badge api-badge">確認</span>
+          <h2>生成されたリクエスト</h2>
+        </div>
+        <div class="api-field">
+          <label>エンドポイント URL</label>
+          <div class="url-display-wrap">
+            <code id="api-endpoint-url" class="auth-url-link" style="text-decoration:none; color:#1a1a2e; font-size:0.75rem;"></code>
+            <button id="copy-endpoint-btn" class="btn btn-icon" title="URLをコピー">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="api-field">
+          <label>curl コマンド</label>
+          <div class="curl-display-wrap">
+            <pre id="api-curl-cmd" class="curl-block"></pre>
+            <button id="copy-curl-btn" class="btn btn-icon copy-curl-abs" title="curlをコピー">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
+          <div id="copy-curl-toast" class="toast hidden">コピーしました！</div>
+        </div>
+        <div class="btn-row">
+          <button id="api-execute-btn" class="btn btn-primary">API を実行</button>
+        </div>
+      </section>
+
+      <!-- レスポンス -->
+      <section class="step-card" id="api-response-section" style="display:none;">
+        <div class="step-header">
+          <span class="step-badge api-badge">レスポンス</span>
+          <h2>APIレスポンス</h2>
+        </div>
+        <div id="api-loading" class="loading hidden">
+          <span class="spinner"></span> API 実行中...
+        </div>
+        <div id="api-response-error" class="error-box hidden"></div>
+        <div id="api-response-result" class="hidden">
+          <div class="response-meta" id="api-response-meta"></div>
+          <pre id="api-response-body" class="raw-json"></pre>
+        </div>
+      </section>
+
+    </div><!-- /tab-api -->
+  </div><!-- /container -->
+
+  <script src="app.js"></script>
+</body>
+</html>
