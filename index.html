@@ -200,6 +200,13 @@
             <input type="number" id="api-page-size" class="api-input api-input-sm" value="10" min="1" max="10000" />
             <span id="api-page-size-note" class="api-field-note"></span>
           </div>
+          <div class="api-field" id="api-page-token-wrap">
+            <label for="api-page-token">pageToken（2ページ目以降）</label>
+            <input type="text" id="api-page-token" class="api-input"
+              placeholder="前回レスポンスの nextPageToken を貼り付け"
+              autocomplete="off" spellcheck="false" />
+            <span class="api-field-note">空欄のときは1ページ目。次ページ取得後は自動で入ります。</span>
+          </div>
         </div>
       </section>
 
@@ -245,6 +252,14 @@
         <div id="api-response-error" class="error-box hidden"></div>
         <div id="api-response-result" class="hidden">
           <div class="response-meta" id="api-response-meta"></div>
+          <div id="api-pagination-bar" class="pagination-bar hidden">
+            <span class="pagination-label">続きがあります</span>
+            <code id="api-next-page-token-preview" class="token-preview"></code>
+            <div class="btn-row">
+              <button type="button" id="api-fetch-next-btn" class="btn btn-primary">次のページを取得</button>
+              <button type="button" id="api-clear-page-token-btn" class="btn btn-ghost">1ページ目に戻す</button>
+            </div>
+          </div>
           <pre id="api-response-body" class="raw-json"></pre>
         </div>
       </section>
