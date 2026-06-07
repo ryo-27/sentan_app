@@ -139,24 +139,25 @@
           <span class="step-badge api-badge">認証</span>
           <h2>認証情報</h2>
         </div>
+        <p class="step-desc">Access Token は短命のため、<strong>Refresh Token</strong> を保存して API 実行時に自動更新します（fitbit登録タブで取得した値を貼り付け）。</p>
         <div class="api-auth-grid">
           <div class="api-field">
-            <label for="api-access-token">Access Token</label>
-            <input type="password" id="api-access-token" class="api-input"
-              placeholder="Access Token を入力"
+            <label for="api-refresh-token">Refresh Token</label>
+            <input type="password" id="api-refresh-token" class="api-input"
+              placeholder="1//0ePHbuAXXc3_...（fitbit登録タブの refresh_token）"
               autocomplete="off" spellcheck="false" />
           </div>
           <div class="api-field-row">
             <div class="api-field">
               <label for="api-client-id">Client ID</label>
               <input type="password" id="api-client-id" class="api-input"
-                placeholder="Client ID を入力"
+                placeholder="...apps.googleusercontent.com"
                 autocomplete="off" spellcheck="false" />
             </div>
             <div class="api-field">
               <label for="api-client-secret">Client Secret</label>
               <input type="password" id="api-client-secret" class="api-input"
-                placeholder="Client Secret を入力"
+                placeholder="GOCSPX-..."
                 autocomplete="off" spellcheck="false" />
             </div>
           </div>
@@ -197,7 +198,7 @@
           <div id="api-filter-fields"></div>
           <div class="api-field">
             <label for="api-page-size">最大件数 (pageSize)</label>
-            <input type="number" id="api-page-size" class="api-input api-input-sm" value="10" min="1" max="10000" />
+            <input type="number" id="api-page-size" class="api-input api-input-sm" value="1000" min="1" max="10000" />
             <span id="api-page-size-note" class="api-field-note"></span>
           </div>
           <div class="api-field" id="api-page-token-wrap">
@@ -240,6 +241,54 @@
         </div>
       </section>
 
+      <!-- 認証フロー（Refresh → Access → API） -->
+      <section class="step-card" id="api-auth-flow-section" style="display:none;">
+        <div class="step-header">
+          <span class="step-badge api-badge">手順</span>
+          <h2>認証フロー</h2>
+        </div>
+        <div class="auth-flow-steps">
+          <div class="auth-flow-step" id="auth-flow-step1">
+            <span class="flow-step-num">1</span>
+            <div class="flow-step-body">
+              <strong>Refresh Token で Access Token を取得</strong>
+              <p id="auth-flow-step1-status" class="flow-step-status">API 実行時に自動で行います</p>
+            </div>
+          </div>
+          <div class="auth-flow-step" id="auth-flow-step2">
+            <span class="flow-step-num">2</span>
+            <div class="flow-step-body">
+              <strong>Access Token で Health API を呼び出し</strong>
+              <p id="auth-flow-step2-status" class="flow-step-status">—</p>
+            </div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="api-refresh-only-btn" class="btn btn-ghost">① トークン更新のみ実行</button>
+        </div>
+        <div id="api-refresh-token-rotated-notice" class="rotation-notice hidden">
+          新しい Refresh Token が発行されました。古いトークンは無効になるため、下の値をコピーして保存してください。
+        </div>
+        <details class="access-token-preview-wrap" open>
+          <summary>Refresh Token（ローテーション時に自動更新）</summary>
+          <div class="token-value-wrap">
+            <code id="api-cached-refresh-token" class="token-value">（未取得）</code>
+            <button type="button" class="btn btn-icon copy-token-btn" data-target="api-cached-refresh-token" title="Refresh Token をコピー">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
+        </details>
+        <details class="access-token-preview-wrap">
+          <summary>取得した Access Token（確認用・curl に使用）</summary>
+          <div class="token-value-wrap">
+            <code id="api-cached-access-token" class="token-value">（未取得）</code>
+            <button type="button" class="btn btn-icon copy-token-btn" data-target="api-cached-access-token" title="Access Token をコピー">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
+        </details>
+      </section>
+
       <!-- レスポンス -->
       <section class="step-card" id="api-response-section" style="display:none;">
         <div class="step-header">
@@ -253,14 +302,20 @@
         <div id="api-response-result" class="hidden">
           <div class="response-meta" id="api-response-meta"></div>
           <div id="api-pagination-bar" class="pagination-bar hidden">
-            <span class="pagination-label">続きがあります</span>
+            <span class="pagination-label">続きがあります（次ページ取得時のみ pageToken を付与）</span>
             <code id="api-next-page-token-preview" class="token-preview"></code>
+            <p id="api-pagination-note" class="api-pagination-note hidden"></p>
             <div class="btn-row">
               <button type="button" id="api-fetch-next-btn" class="btn btn-primary">次のページを取得</button>
               <button type="button" id="api-clear-page-token-btn" class="btn btn-ghost">1ページ目に戻す</button>
             </div>
           </div>
-          <pre id="api-response-body" class="raw-json"></pre>
+          <p class="api-field-note">API レスポンスの <code>body</code> を表示します。</p>
+          <pre id="api-response-body" class="raw-json api-response-full"></pre>
+          <details class="raw-json-wrap">
+            <summary>リクエスト / ヘッダーなど詳細</summary>
+            <pre id="api-response-debug" class="raw-json"></pre>
+          </details>
         </div>
       </section>
 
