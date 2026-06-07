@@ -276,6 +276,18 @@ function renderTokenResult(data) {
   document.getElementById('raw-json-output').textContent = JSON.stringify(data, null, 2);
 
   show(tokenResult);
+
+  if (parsedCredentials && data.refresh_token) {
+    try {
+      sessionStorage.setItem('health_api_auth', JSON.stringify({
+        client_id:     parsedCredentials.client_id,
+        client_secret: parsedCredentials.client_secret,
+        refresh_token: data.refresh_token,
+      }));
+    } catch (_) { /* ignore */ }
+    document.getElementById('api-refresh-token').value = data.refresh_token;
+    syncRefreshTokenPreview(data.refresh_token);
+  }
 }
 
 // =====================
@@ -305,6 +317,8 @@ document.querySelectorAll('.copy-token-btn').forEach(btn => {
 // ============================================================
 
 const BASE_URL = 'https://health.googleapis.com';
+const DEFAULT_PAGE_SIZE = 1000;
+const DEFAULT_RANGE_HOURS = 48;
 
 // ----- フィルター時刻オプション (list API / Endpoints 準拠) -----
 // https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/list
@@ -391,7 +405,12 @@ function kebabToSnake(str) {
   return str.replace(/-/g, '_');
 }
 
-/** filter 式の data type 識別子（URL=kebab / filter=snake） */
+/**
+ * filter 式の data type 識別子
+ * - URL パス: kebab-case（例: daily-resting-heart-rate）
+ * - filter: snake_case（例: daily_resting_heart_rate）— Discovery / Endpoints 準拠
+ *   https://developers.google.com/health/reference/rest
+ */
 function getFilterField(item) {
   return item.id.includes('-') ? kebabToSnake(item.id) : item.id;
 }
@@ -399,6 +418,167 @@ function getFilterField(item) {
 function getFilterFieldForOption(item, option) {
   if (option.field) return option.field;
   return getFilterField(item);
+}
+
+const TOKEN_URI = 'https://oauth2.googleapis.com/token';
+
+let cachedAccessToken = null;
+let cachedAccessTokenExpiresAt = 0;
+
+function buildCurlCommand(method, url, accessToken) {
+  const tokenDisplay = accessToken || 'YOUR_ACCESS_TOKEN';
+  return [
+    `curl -X ${method} \\`,
+    `  -H "Authorization: Bearer ${tokenDisplay}" \\`,
+    `  -H "Accept: application/json" \\`,
+    `  "${url}"`,
+  ].join('\n');
+}
+
+function formatResponseBodyDisplay(parsedBody, rawText) {
+  if (parsedBody !== undefined && parsedBody !== null) {
+    return JSON.stringify(parsedBody, null, 2);
+  }
+  return rawText || '';
+}
+
+function formatResponseDebug(requestInfo, res, rawText, parsedBody, elapsedMs) {
+  let parsed = parsedBody;
+  if (parsed === undefined && rawText) {
+    try { parsed = JSON.parse(rawText); } catch { parsed = rawText; }
+  }
+  const headers = {};
+  res.headers.forEach((value, key) => { headers[key] = value; });
+  return JSON.stringify({
+    request: requestInfo,
+    response: { status: res.status, statusText: res.statusText, ok: res.ok, elapsedMs, headers, bodyRaw: rawText, body: parsed },
+  }, null, 2);
+}
+
+function setAuthFlowStep(stepNum, state, message) {
+  const el = document.getElementById(`auth-flow-step${stepNum}`);
+  const statusEl = document.getElementById(`auth-flow-step${stepNum}-status`);
+  if (!el || !statusEl) return;
+  el.classList.remove('active', 'done', 'error');
+  if (state) el.classList.add(state);
+  statusEl.textContent = message;
+}
+
+function showAuthFlowSection() {
+  document.getElementById('api-auth-flow-section').style.display = 'block';
+}
+
+function loadApiAuthFromStorage() {
+  try {
+    const raw = sessionStorage.getItem('health_api_auth');
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    const setIfEmpty = (id, val) => {
+      const el = document.getElementById(id);
+      if (el && !el.value && val) el.value = val;
+    };
+    setIfEmpty('api-client-id', data.client_id);
+    setIfEmpty('api-client-secret', data.client_secret);
+    setIfEmpty('api-refresh-token', data.refresh_token);
+    syncRefreshTokenPreview(data.refresh_token);
+  } catch (_) { /* ignore */ }
+}
+
+loadApiAuthFromStorage();
+syncRefreshTokenPreview();
+
+function syncRefreshTokenPreview(token) {
+  const preview = document.getElementById('api-cached-refresh-token');
+  if (!preview) return;
+  const val = token || document.getElementById('api-refresh-token')?.value.trim();
+  preview.textContent = val || '（未取得）';
+}
+
+function persistAuthToStorage(refreshToken) {
+  try {
+    const data = {
+      client_id:     document.getElementById('api-client-id').value.trim(),
+      client_secret: document.getElementById('api-client-secret').value.trim(),
+      refresh_token: refreshToken,
+    };
+    sessionStorage.setItem('health_api_auth', JSON.stringify(data));
+  } catch (_) { /* ignore */ }
+}
+
+/** Google が refresh 応答で新 refresh_token を返したときに入力欄・表示を更新 */
+function applyRefreshTokenRotation(newRefreshToken) {
+  if (!newRefreshToken) return false;
+
+  document.getElementById('api-refresh-token').value = newRefreshToken;
+  syncRefreshTokenPreview(newRefreshToken);
+  persistAuthToStorage(newRefreshToken);
+
+  const fitbitRefresh = document.getElementById('val-refresh-token');
+  if (fitbitRefresh) fitbitRefresh.textContent = newRefreshToken;
+
+  const notice = document.getElementById('api-refresh-token-rotated-notice');
+  if (notice) show(notice);
+
+  return true;
+}
+
+async function refreshAccessToken(force = false) {
+  const clientId = document.getElementById('api-client-id').value.trim();
+  const clientSecret = document.getElementById('api-client-secret').value.trim();
+  const refreshToken = document.getElementById('api-refresh-token').value.trim();
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error('Client ID、Client Secret、Refresh Token を入力してください。');
+  }
+
+  syncRefreshTokenPreview(refreshToken);
+
+  if (!force && cachedAccessToken && Date.now() < cachedAccessTokenExpiresAt - 60_000) {
+    setAuthFlowStep(1, 'done', `キャッシュ利用（残り約 ${Math.max(0, Math.floor((cachedAccessTokenExpiresAt - Date.now()) / 1000))} 秒）`);
+    return cachedAccessToken;
+  }
+
+  showAuthFlowSection();
+  setAuthFlowStep(1, 'active', 'トークン取得中...');
+
+  const res = await fetch(TOKEN_URI, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id:     clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type:    'refresh_token',
+    }).toString(),
+  });
+
+  const json = await res.json();
+  if (!res.ok) {
+    const msg = json.error_description || json.error || res.statusText;
+    setAuthFlowStep(1, 'error', `失敗: ${msg}`);
+    cachedAccessToken = null;
+    cachedAccessTokenExpiresAt = 0;
+    if (json.error === 'invalid_grant') {
+      throw new Error(`トークン更新失敗 (${res.status}): ${msg}\n\nRefresh Token の期限切れの可能性があります。fitbit登録タブから再認可してください。`);
+    }
+    throw new Error(`トークン更新失敗 (${res.status}): ${msg}`);
+  }
+
+  cachedAccessToken = json.access_token;
+  cachedAccessTokenExpiresAt = Date.now() + (json.expires_in || 3600) * 1000;
+  document.getElementById('api-cached-access-token').textContent = cachedAccessToken;
+
+  let step1Msg = `成功（expires_in: ${json.expires_in} 秒）`;
+  if (json.refresh_token) {
+    applyRefreshTokenRotation(json.refresh_token);
+    step1Msg += ' ・Refresh Token 更新あり';
+  } else {
+    hide(document.getElementById('api-refresh-token-rotated-notice'));
+  }
+
+  setAuthFlowStep(1, 'done', step1Msg);
+  if (currentApiItem) updateEndpoint();
+  return cachedAccessToken;
 }
 
 /** @param {'civil'|'utc'|'date'} inputType */
@@ -440,7 +620,7 @@ const API_CATEGORIES = {
       { id: 'sedentary-period',    label: '座位時間 (sedentary-period)',        method: 'GET', path: '/v4/users/me/dataTypes/sedentary-period/dataPoints',    filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
       { id: 'swim-lengths-data',   label: '水泳ラップ (swim-lengths-data)',      method: 'GET', path: '/v4/users/me/dataTypes/swim-lengths-data/dataPoints',   filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
       { id: 'time-in-heart-rate-zone', label: '心拍ゾーン時間 (time-in-heart-rate-zone)', method: 'GET', path: '/v4/users/me/dataTypes/time-in-heart-rate-zone/dataPoints', filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
-      { id: 'activity-level',      label: '活動レベル (activity-level)',        method: 'GET', path: '/v4/users/me/dataTypes/activity-level/dataPoints',      filter: { options: ['daily_date'], default: 'daily_date' } },
+      { id: 'activity-level',      label: '活動レベル (activity-level)',        method: 'GET', path: '/v4/users/me/dataTypes/activity-level/dataPoints',      filter: { options: ['interval_civil_start', 'interval_start'], default: 'interval_civil_start' } },
     ],
   },
   heart: {
@@ -499,12 +679,30 @@ const API_CATEGORIES = {
   },
 };
 
-// ----- デフォルト日付 (昨日〜今日) -----
-function defaultDates() {
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function toDateLocal(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function toDatetimeLocal(d) {
+  return `${toDateLocal(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/** デフォルト期間: 48時間前 〜 現在（date は終了日を翌日で排他的上限） */
+function defaultTimeRange(inputWidget) {
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const yesterday = new Date(now - 86400000).toISOString().slice(0, 10);
-  return { start: yesterday, end: today };
+  const start = new Date(now.getTime() - DEFAULT_RANGE_HOURS * 60 * 60 * 1000);
+
+  if (inputWidget === 'datetime-local') {
+    return { start: toDatetimeLocal(start), end: toDatetimeLocal(now) };
+  }
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return { start: toDateLocal(start), end: toDateLocal(tomorrow) };
 }
 
 // ----- カテゴリ選択 → データタイプ一覧更新 -----
@@ -576,10 +774,10 @@ function applyPageSizeLimits(item) {
   const input = document.getElementById('api-page-size');
   const note  = document.getElementById('api-page-size-note');
   const tokenWrap = document.getElementById('api-page-token-wrap');
-  const limits = item.pageSize || { max: 10000, default: 10 };
+  const limits = item.pageSize || { max: 10000, default: DEFAULT_PAGE_SIZE };
   input.max = limits.max;
   input.min = 1;
-  input.value = Math.min(Number(input.value) || limits.default, limits.max);
+  input.value = Math.min(limits.default, limits.max);
   if (limits.max <= 25) {
     note.textContent = `※ ${item.id} は pageSize 最大 ${limits.max}（公式デフォルト ${limits.default}）`;
   } else {
@@ -602,7 +800,6 @@ function renderFilterUI(item) {
   apiFilterWrap.style.display = 'flex';
   applyPageSizeLimits(item);
 
-  const { start, end } = defaultDates();
   const defaultKey = item.filter.default;
   const defaultOpt = TIME_FILTER_OPTIONS[defaultKey];
 
@@ -627,8 +824,7 @@ function renderFilterUI(item) {
   function buildTimeInputsHtml(opt) {
     const isUtc = opt.inputType === 'utc';
     const inputType = opt.inputWidget || (opt.inputType === 'date' ? 'date' : 'datetime-local');
-    const startVal = isUtc ? `${start}T00:00` : start;
-    const endVal = isUtc ? `${end}T00:00` : end;
+    const { start: startVal, end: endVal } = defaultTimeRange(inputType);
     const startLabel = opt.rangeEnd
       ? (isUtc ? '開始 (以上・UTC)' : '開始 (以上)')
       : (isUtc ? '開始 (以上・UTC) のみ' : '開始 (以上) のみ');
@@ -638,7 +834,7 @@ function renderFilterUI(item) {
         <div class="api-field">
           <label for="filter-start">${startLabel}</label>
           <input type="${inputType}" id="filter-start" class="api-input" value="${startVal}" />
-          <input type="hidden" id="filter-end" value="${end}" />
+          <input type="hidden" id="filter-end" value="${endVal}" />
         </div>`;
     }
     return `
@@ -730,7 +926,7 @@ function buildApiUrl(item) {
   if (filter) url.searchParams.set('filter', filter);
   if (item.filter && pageSize) {
     const max = (item.pageSize && item.pageSize.max) || 10000;
-    url.searchParams.set('pageSize', Math.min(Number(pageSize) || 10, max));
+    url.searchParams.set('pageSize', Math.min(Number(pageSize) || DEFAULT_PAGE_SIZE, max));
   }
   if (pageToken) url.searchParams.set('pageToken', pageToken);
   return url;
@@ -742,14 +938,22 @@ function clearPageToken() {
   hide(document.getElementById('api-pagination-bar'));
 }
 
-function showNextPageToken(token) {
+function showNextPageToken(token, note) {
   const bar = document.getElementById('api-pagination-bar');
   const preview = document.getElementById('api-next-page-token-preview');
+  const noteEl = document.getElementById('api-pagination-note');
   if (!token) {
     hide(bar);
     return;
   }
   preview.textContent = token;
+  if (note) {
+    noteEl.textContent = note;
+    show(noteEl);
+  } else {
+    noteEl.textContent = '';
+    hide(noteEl);
+  }
   show(bar);
 }
 
@@ -757,27 +961,14 @@ function showNextPageToken(token) {
 function updateEndpoint() {
   if (!currentApiItem) return;
 
-  const accessToken = document.getElementById('api-access-token').value.trim();
   const fullUrl = buildApiUrl(currentApiItem).toString();
   apiEndpointUrl.textContent = fullUrl;
 
-  // curl コマンド
-  const tokenDisplay = accessToken || 'YOUR_ACCESS_TOKEN';
-  const curlLines = [
-    `curl -X ${currentApiItem.method} \\`,
-    `  -H "Authorization: Bearer ${tokenDisplay}" \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  "${fullUrl}"`,
-  ];
-  apiCurlCmd.textContent = curlLines.join('\n');
+  apiCurlCmd.textContent = buildCurlCommand(currentApiItem.method, fullUrl, cachedAccessToken);
 
   apiEndpointSection.style.display = 'block';
+  showAuthFlowSection();
 }
-
-// アクセストークン変更でも curl を更新
-document.getElementById('api-access-token').addEventListener('input', () => {
-  if (currentApiItem) updateEndpoint();
-});
 
 // ----- コピーボタン -----
 document.getElementById('copy-endpoint-btn').addEventListener('click', () => {
@@ -802,88 +993,141 @@ function copyText(text) {
   });
 }
 
-// ----- API 実行 -----
+async function callHealthApi(requestUrl, accessToken) {
+  return fetch(requestUrl, {
+    method:  currentApiItem.method,
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept':        'application/json',
+    },
+  });
+}
+
+function renderApiResponse(res, rawText, parsedBody, elapsed, requestUrl, pageTokenUsed) {
+  const statusClass = res.ok ? 'ok' : 'err';
+  const pageInfo = pageTokenUsed
+    ? '<span class="response-time">pageToken 指定あり</span>'
+    : '<span class="response-time">1ページ目</span>';
+  let countInfo = '';
+  if (parsedBody && typeof parsedBody === 'object') {
+    const n = Array.isArray(parsedBody.dataPoints) ? parsedBody.dataPoints.length : null;
+    if (n !== null) countInfo = `<span class="response-time">dataPoints: ${n} 件</span>`;
+    if (parsedBody.nextPageToken) countInfo += '<span class="response-time">nextPageToken あり</span>';
+  }
+  apiResponseMeta.innerHTML = `
+    <span class="response-status ${statusClass}">HTTP ${res.status} ${res.statusText}</span>
+    <span class="response-time">${elapsed} ms</span>
+    ${pageInfo}
+    ${countInfo}`;
+
+  apiResponseBody.textContent = formatResponseBodyDisplay(parsedBody, rawText);
+  const debugEl = document.getElementById('api-response-debug');
+  if (debugEl) {
+    debugEl.textContent = formatResponseDebug(
+      { method: currentApiItem.method, url: requestUrl },
+      res, rawText, parsedBody, elapsed
+    );
+  }
+
+  show(apiResponseResult);
+
+  if (res.ok && parsedBody && typeof parsedBody === 'object' && parsedBody.nextPageToken) {
+    const n = Array.isArray(parsedBody.dataPoints) ? parsedBody.dataPoints.length : 0;
+    const note = n === 0
+      ? 'dataPoints が空ですが nextPageToken があります。pageSize を増やすか「次のページを取得」を試してください。'
+      : '「次のページを取得」で pageToken を付けて続きを取得できます。';
+    showNextPageToken(parsedBody.nextPageToken, note);
+    hideError(apiResponseError);
+  } else {
+    hide(document.getElementById('api-pagination-bar'));
+    if (res.ok) hideError(apiResponseError);
+  }
+
+  if (!res.ok) {
+    const errMsg = (parsedBody && typeof parsedBody === 'object' && parsedBody.error)
+      ? (parsedBody.error.message || JSON.stringify(parsedBody.error))
+      : res.statusText;
+    let fullMsg = `API エラー (${res.status}): ${errMsg}`;
+    if (res.status === 401) {
+      fullMsg += '\n\nAccess Token の期限切れの可能性があります。「① トークン更新のみ実行」または再度「API を実行」で Refresh から取り直してください。';
+    }
+    showError(apiResponseError, fullMsg);
+  }
+}
+
+['api-refresh-token', 'api-client-id', 'api-client-secret'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    cachedAccessToken = null;
+    cachedAccessTokenExpiresAt = 0;
+    const preview = document.getElementById('api-cached-access-token');
+    if (preview) preview.textContent = '（未取得）';
+    if (id === 'api-refresh-token') syncRefreshTokenPreview();
+  });
+});
+
+// ----- API 実行（Refresh → Access → API） -----
 async function executeApiRequest() {
   if (!currentApiItem) return;
 
-  const accessToken = document.getElementById('api-access-token').value.trim();
-  if (!accessToken) {
-    alert('Access Token を入力してください。');
-    return;
-  }
-
   const url = buildApiUrl(currentApiItem);
+  const requestUrl = url.toString();
+  const pageTokenUsed = document.getElementById('api-page-token').value.trim();
 
   apiResponseSection.style.display = 'block';
+  showAuthFlowSection();
   show(apiLoading);
   hide(apiResponseError);
   hide(apiResponseResult);
   hide(document.getElementById('api-pagination-bar'));
+  setAuthFlowStep(2, 'active', '準備中...');
   apiResponseSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  const startMs = Date.now();
-  const pageTokenUsed = document.getElementById('api-page-token').value.trim();
-
   try {
-    const res = await fetch(url.toString(), {
-      method:  currentApiItem.method,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type':  'application/json',
-      },
-    });
+    let accessToken = await refreshAccessToken(false);
 
-    const elapsed = Date.now() - startMs;
-    let body;
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      body = await res.json();
-    } else {
-      body = await res.text();
+    const startMs = Date.now();
+    setAuthFlowStep(2, 'active', 'API 呼び出し中...');
+    let res = await callHealthApi(requestUrl, accessToken);
+    let elapsed = Date.now() - startMs;
+
+    if (res.status === 401) {
+      setAuthFlowStep(1, 'active', '401 のため再取得...');
+      accessToken = await refreshAccessToken(true);
+      const retryStart = Date.now();
+      res = await callHealthApi(requestUrl, accessToken);
+      elapsed = Date.now() - retryStart;
     }
+
+    const rawText = await res.text();
+    let parsedBody;
+    try { parsedBody = rawText ? JSON.parse(rawText) : null; } catch { parsedBody = undefined; }
 
     hide(apiLoading);
-
-    const statusClass = res.ok ? 'ok' : 'err';
-    const pageInfo = pageTokenUsed
-      ? '<span class="response-time">pageToken 指定あり</span>'
-      : '<span class="response-time">1ページ目</span>';
-    apiResponseMeta.innerHTML = `
-      <span class="response-status ${statusClass}">HTTP ${res.status} ${res.statusText}</span>
-      <span class="response-time">${elapsed} ms</span>
-      ${pageInfo}`;
-
-    apiResponseBody.textContent = typeof body === 'string'
-      ? body
-      : JSON.stringify(body, null, 2);
-
-    show(apiResponseResult);
-    updateEndpoint();
-
-    if (res.ok && typeof body === 'object' && body && body.nextPageToken) {
-      showNextPageToken(body.nextPageToken);
-    } else {
-      hide(document.getElementById('api-pagination-bar'));
-    }
-
-    if (!res.ok) {
-      const errMsg = (typeof body === 'object' && body.error)
-        ? (body.error.message || JSON.stringify(body.error))
-        : res.statusText;
-      showError(apiResponseError, `API エラー (${res.status}): ${errMsg}`);
-    }
+    setAuthFlowStep(2, res.ok ? 'done' : 'error', res.ok ? `完了（${elapsed} ms）` : `失敗 HTTP ${res.status}`);
+    renderApiResponse(res, rawText, parsedBody, elapsed, requestUrl, pageTokenUsed);
 
   } catch (err) {
     hide(apiLoading);
-    showError(apiResponseError, `ネットワークエラー: ${err.message}\n\n※ CORS制限がある場合は curl コマンドをターミナルで直接実行してください。`);
+    setAuthFlowStep(2, 'error', `中断: ${err.message}`);
+    showError(apiResponseError, err.message + '\n\n※ CORS制限がある場合は curl をターミナルで実行してください。');
     show(apiResponseResult);
-    apiResponseMeta.innerHTML = '<span class="response-status err">ネットワークエラー</span>';
-    apiResponseBody.textContent = '';
+    apiResponseMeta.innerHTML = '<span class="response-status err">エラー</span>';
+    apiResponseBody.textContent = JSON.stringify({ error: err.message }, null, 2);
     hide(document.getElementById('api-pagination-bar'));
   }
 }
 
 document.getElementById('api-execute-btn').addEventListener('click', executeApiRequest);
+
+document.getElementById('api-refresh-only-btn').addEventListener('click', async () => {
+  showAuthFlowSection();
+  hide(apiResponseError);
+  try {
+    await refreshAccessToken(true);
+  } catch (err) {
+    showError(apiResponseError, err.message);
+  }
+});
 
 document.getElementById('api-fetch-next-btn').addEventListener('click', () => {
   const preview = document.getElementById('api-next-page-token-preview');
